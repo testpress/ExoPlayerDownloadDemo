@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">ExoPlayerDownloadDemo</string>
+    <string name="download_notification_channel_name">Media Downloads</string>
+    <string name="download_notification_channel_description">Shows download progress for all media files</string>
+    <string name="download">Download</string>
+    <string name="cancel_download">Cancel Download</string>
+    <string name="delete_download">Delete Download</string>
+    <string name="download_completed">Download Completed</string>
+    <string name="downloading">Downloading…</string>
+    <string name="not_downloaded">Not Downloaded</string>
+    <string name="downloaded">Downloaded (offline playback available)</string>
+</resources>
