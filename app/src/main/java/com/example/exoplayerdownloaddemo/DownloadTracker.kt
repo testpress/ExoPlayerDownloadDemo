@@ -5,12 +5,18 @@ import android.net.Uri
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
+import androidx.media3.common.TrackGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.util.Util
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadHelper
 import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadRequest
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.trackselection.MappingTrackSelector
 import com.google.common.collect.ImmutableList
+import java.io.IOException
 import java.util.concurrent.CopyOnWriteArraySet
 
 @UnstableApi
@@ -30,6 +36,7 @@ class DownloadTracker(private val context: Context) {
 
     interface Listener {
         fun onDownloadsChanged()
+        fun showTrackSelectionDialog(helper: DownloadHelper, mediaItem: MediaItem)
     }
 
     fun addListener(listener: Listener) {
@@ -79,13 +86,40 @@ class DownloadTracker(private val context: Context) {
         }
     }
 
-    private fun startDownload(mediaItem: MediaItem) {
-        val downloadRequest = DownloadRequest.Builder(mediaItem.mediaId, mediaItem.localConfiguration?.uri!!)
-            .setData(mediaItem.mediaId.toByteArray())
-            .setCustomCacheKey(mediaItem.mediaId)
-            .build()
+    private fun startDownload(mediaItem: MediaItem) {    
+        val downloadHelper = DownloadHelper.forMediaItem(
+            context,
+            mediaItem,
+            DefaultRenderersFactory(context),
+            ExoPlayerDownloadDemoApp.httpDataSourceFactory
+        )
+        
+        downloadHelper.prepare(object : DownloadHelper.Callback {
+            override fun onPrepared(helper: DownloadHelper) {
+                Log.d(TAG, "Download helper prepared")
+                
+                for (listener in listeners) {
+                    listener.showTrackSelectionDialog(helper, mediaItem)
+                }
+            }
+            
+            override fun onPrepareError(helper: DownloadHelper, e: IOException) {
+                Log.e(TAG, "Error preparing download helper", e)
+                helper.release()
+            }
+        })
+    }
+
+    fun startDownloadWithTrackSelection(helper: DownloadHelper, mediaItem: MediaItem) {
+        val downloadRequest = helper.getDownloadRequest(
+            mediaItem.mediaId,
+            mediaItem.mediaId.toByteArray()
+        )
+        Log.d(TAG, "DownloadRequest URI: ${downloadRequest.uri}")
         
         TPDownloadService.sendAddDownload(context, downloadRequest)
+        
+        helper.release()
     }
 
     private fun loadDownloads() {
@@ -131,7 +165,7 @@ class DownloadTracker(private val context: Context) {
         private val tracker: DownloadTracker
     ) {
         fun startDownload() {
-            tracker.startDownload(mediaItem)
+            tracker.toggleDownload(mediaItem)
         }
     }
 

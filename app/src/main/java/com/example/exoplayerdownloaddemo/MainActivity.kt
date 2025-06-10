@@ -12,18 +12,25 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadHelper
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.trackselection.MappingTrackSelector
 import androidx.media3.ui.PlayerView
 import com.example.exoplayerdownloaddemo.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +46,7 @@ class MainActivity : AppCompatActivity(), DownloadTracker.Listener {
     private lateinit var downloadTracker: DownloadTracker
     private lateinit var videoUrl: String
     private lateinit var mediaItem: MediaItem
+    private lateinit var trackSelector: DefaultTrackSelector
 
     // Permission request launcher
     private val requestPermissionLauncher = registerForActivityResult(
@@ -68,13 +76,20 @@ class MainActivity : AppCompatActivity(), DownloadTracker.Listener {
         downloadTracker.addListener(this)
 
         // Set up the video URL
-        videoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+        videoUrl = "https://dlbdnoa93s0gw.cloudfront.net/transcoded/ACGhHuD7DEa/video.m3u8"
         
-        // Create a media item for our video
-        mediaItem = MediaItem.Builder()
-            .setUri(Uri.parse(videoUrl))
-            .setMediaId(videoUrl)
-            .build()
+        val uri = Uri.parse(videoUrl)
+        val downloadRequest = downloadTracker.getDownloadRequest(uri)
+        mediaItem = if (downloadRequest != null) {
+            // If downloaded, create MediaItem from download request
+            downloadRequest.toMediaItem()
+        } else {
+            // If not downloaded, create normal MediaItem
+            MediaItem.Builder()
+                .setUri(uri)
+                .setMediaId(videoUrl)
+                .build()
+        }
 
         initializePlayer()
         
@@ -110,9 +125,13 @@ class MainActivity : AppCompatActivity(), DownloadTracker.Listener {
             .setUpstreamDataSourceFactory(dataSourceFactory)
             .setCacheWriteDataSinkFactory(null) // Disable writing in player (we handle this in download service)
         
+        // Create track selector
+        trackSelector = DefaultTrackSelector(this)
+        
         // Create the player with the cache data source factory
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory))
+            .setTrackSelector(trackSelector)
             .build()
         
         // Attach player to the view
@@ -204,6 +223,94 @@ class MainActivity : AppCompatActivity(), DownloadTracker.Listener {
         updateDownloadButton()
         Log.d(Companion.TAG, "Downloads changed")
     }
+    
+    override fun showTrackSelectionDialog(helper: DownloadHelper, mediaItem: MediaItem) {
+        // Get track groups for video renderer
+        val mappedTrackInfo = helper.getMappedTrackInfo(0)
+        val rendererIndex = getFirstVideoRendererIndex(mappedTrackInfo)
+        
+        if (rendererIndex == C.INDEX_UNSET) {
+            Toast.makeText(this, "No video tracks available", Toast.LENGTH_SHORT).show()
+            helper.release()
+            return
+        }
+        
+        val trackGroups = mappedTrackInfo.getTrackGroups(rendererIndex)
+        
+        // Create list of available video qualities
+        val trackItems = mutableListOf<TrackItem>()
+        
+        for (groupIndex in 0 until trackGroups.length) {
+            val trackGroup = trackGroups[groupIndex]
+            for (trackIndex in 0 until trackGroup.length) {
+                val format = trackGroup.getFormat(trackIndex)
+                if (format.height > 0) { // Only include tracks with valid height
+                    val trackName = "${format.width}x${format.height} (${format.bitrate / 1024} kbps)"
+                    trackItems.add(TrackItem(groupIndex, trackIndex, trackName, format.height))
+                }
+            }
+        }
+        
+        // Sort by resolution (highest first)
+        trackItems.sortByDescending { it.height }
+        
+        // Add "All resolutions" option at the beginning
+        trackItems.add(0, TrackItem(-1, -1, "All resolutions (default)", Int.MAX_VALUE))
+        
+        // Create dialog items
+        val items = trackItems.map { it.name }.toTypedArray()
+        
+        // Show dialog
+        AlertDialog.Builder(this)
+            .setTitle("Select Video Quality")
+            .setItems(items) { _, which ->
+                val selectedTrack = trackItems[which]
+                
+                if (selectedTrack.groupIndex == -1) {
+                    // Download all tracks (default behavior)
+                    downloadTracker.startDownloadWithTrackSelection(helper, mediaItem)
+                } else {
+                    // Set track selection for specific resolution
+                    helper.clearTrackSelections(rendererIndex)
+                    
+                    // Create track override for the selected track
+                    val trackGroup = trackGroups[selectedTrack.groupIndex]
+                    val trackIndices = listOf(selectedTrack.trackIndex)
+                    val override = TrackSelectionOverride(trackGroup, trackIndices)
+                    
+                    // Create parameters with the override
+                    val parameters = TrackSelectionParameters.Builder()
+                        .addOverride(override)
+                        .build()
+                    
+                    // Apply track selection
+                    helper.addTrackSelection(rendererIndex, parameters)
+                    downloadTracker.startDownloadWithTrackSelection(helper, mediaItem)
+                }
+            }
+            .setOnCancelListener {
+                // Release helper if dialog is dismissed
+                helper.release()
+            }
+            .show()
+    }
+    
+    private fun getFirstVideoRendererIndex(mappedTrackInfo: MappingTrackSelector.MappedTrackInfo): Int {
+        for (i in 0 until mappedTrackInfo.rendererCount) {
+            if (mappedTrackInfo.getRendererType(i) == C.TRACK_TYPE_VIDEO) {
+                return i
+            }
+        }
+        return C.INDEX_UNSET
+    }
+    
+    // Data class to hold track information
+    private data class TrackItem(
+        val groupIndex: Int,
+        val trackIndex: Int,
+        val name: String,
+        val height: Int
+    )
 
     override fun onStart() {
         super.onStart()
